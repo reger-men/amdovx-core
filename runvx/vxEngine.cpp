@@ -84,7 +84,7 @@ CVxEngine::~CVxEngine()
 	Shutdown();
 }
 
-int CVxEngine::Initialize(int argCount, int defaultTargetAffinity, int defaultTargetInfo, bool enableScheduleGraph, bool disableVirtual)
+int CVxEngine::Initialize(int argCount, int defaultTargetAffinity, int defaultTargetInfo, bool enableScheduleGraph, bool disableVirtual, bool enableFullProfile, bool disableNodeFlushForCL)
 {
 	// save configuration
 	m_paramCount = argCount;
@@ -121,6 +121,14 @@ int CVxEngine::Initialize(int argCount, int defaultTargetAffinity, int defaultTa
 	m_graphVerified = false;
 	m_graph = vxCreateGraph(m_context);
 	if (vxGetStatus((vx_reference)m_graph)){ printf("ERROR: vxCreateGraph failed\n"); throw - 1; }
+
+	// select graph options
+	if(enableFullProfile) {
+	    vxDirective((vx_reference)m_graph, VX_DIRECTIVE_AMD_ENABLE_PROFILE_CAPTURE);
+	}
+	if(disableNodeFlushForCL) {
+	    vxDirective((vx_reference)m_graph, VX_DIRECTIVE_AMD_DISABLE_OPENCL_FLUSH);
+	}
 
 	return 0;
 }
@@ -925,7 +933,7 @@ int CVxEngine::BuildAndProcessGraphFromLine(int level, char * line)
 					int subObjIndex = 0;
 					paramDescIndex = ScanParameters(paramDescIndex, "[<index>]", "[d]", &subObjIndex);
 					// get sub-indexed object
-					vx_enum type; ERROR_CHECK(vxQueryReference(ref, VX_REF_ATTRIBUTE_TYPE, &type, sizeof(type)));
+					vx_enum type; ERROR_CHECK(vxQueryReference(ref, VX_REFERENCE_TYPE, &type, sizeof(type)));
 					if (type == VX_TYPE_PYRAMID) {
 						ref = (vx_reference)vxGetPyramidLevel((vx_pyramid)ref, (vx_uint32)subObjIndex);
 						status = vxGetStatus(ref);

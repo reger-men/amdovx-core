@@ -98,7 +98,7 @@ int CVxParamTensor::Initialize(vx_context context, vx_graph graph, const char * 
 		if (itMaster == m_paramMap->end())
 			ReportError("ERROR: tensor [%s] doesn't exist for %s\n", masterName, desc);
 		vx_tensor masterTensor = (vx_tensor)itMaster->second->GetVxObject();
-		m_tensor = vxCreateTensorFromROI(masterTensor, m_num_of_dims, m_start, m_end);
+		m_tensor = vxCreateTensorFromView(masterTensor, m_num_of_dims, m_start, m_end);
 	}
 	else ReportError("ERROR: unsupported tensor type: %s\n", desc);
 	vx_status ovxStatus = vxGetStatus((vx_reference)m_tensor);
@@ -118,11 +118,16 @@ int CVxParamTensor::InitializeIO(vx_context context, vx_graph graph, vx_referenc
 	// save reference object and get object attributes
 	m_vxObjRef = ref;
 	m_tensor = (vx_tensor)m_vxObjRef;
-	ERROR_CHECK(vxQueryTensor(m_tensor, VX_TENSOR_NUM_OF_DIMS, &m_num_of_dims, sizeof(m_num_of_dims)));
+	ERROR_CHECK(vxQueryTensor(m_tensor, VX_TENSOR_NUMBER_OF_DIMS, &m_num_of_dims, sizeof(m_num_of_dims)));
 	ERROR_CHECK(vxQueryTensor(m_tensor, VX_TENSOR_DIMS, &m_dims, sizeof(m_dims[0])*m_num_of_dims));
 	ERROR_CHECK(vxQueryTensor(m_tensor, VX_TENSOR_DATA_TYPE, &m_data_type, sizeof(m_data_type)));
-	ERROR_CHECK(vxQueryTensor(m_tensor, VX_TENSOR_FIXED_POINT_POS, &m_fixed_point_pos, sizeof(vx_uint8)));
-	m_size = m_data_type == VX_TYPE_FLOAT32 ? 4 : 2;
+	ERROR_CHECK(vxQueryTensor(m_tensor, VX_TENSOR_FIXED_POINT_POSITION, &m_fixed_point_pos, sizeof(vx_uint8)));
+	if(m_data_type == VX_TYPE_UINT8 || m_data_type == VX_TYPE_INT8)
+		m_size = 1;
+	else if(m_data_type == VX_TYPE_UINT16 || m_data_type == VX_TYPE_INT16 || m_data_type == VX_TYPE_FLOAT16)
+		m_size = 2;
+	else
+	    m_size = 4;
 	for (vx_uint32 i = 0; i < m_num_of_dims; i++) {
 		m_stride[i] = m_size;
 		m_size *= m_dims[i];
@@ -148,6 +153,19 @@ int CVxParamTensor::InitializeIO(vx_context context, vx_graph graph, vx_referenc
 				}
 				else ReportError("ERROR: invalid tensor read option: %s\n", option);
 			}
+		}
+		else if (!_stricmp(ioType, "init"))
+		{ // init request syntax: init,<fileName>
+			FILE * fp = fopen(RootDirUpdated(fileName), "rb");
+			if (!fp) {
+				ReportError("ERROR: Unable to open: %s\n", fileName);
+			}
+			if (fread(m_data, 1, m_size, fp) != m_size)
+				ReportError("ERROR: not enough data (%d bytes) in %s\n", (vx_uint32)m_size, fileName);
+			vx_status status = vxCopyTensorPatch(m_tensor, m_num_of_dims, nullptr, nullptr, m_stride, m_data, VX_WRITE_ONLY, VX_MEMORY_TYPE_HOST);
+			fclose(fp);
+			if (status != VX_SUCCESS)
+				ReportError("ERROR: vxCopyTensorPatch: write failed (%d)\n", status);
 		}
 		else if (!_stricmp(ioType, "write"))
 		{ // write request syntax: write,<fileName>[,ascii|binary]
@@ -306,8 +324,9 @@ int CVxParamTensor::CompareFrame(int frameNumber)
 		}
 		vx_size count = m_dims[0] * m_dims[1] * m_dims[2] * m_dims[3];
 		float avgError = (float)sumError / (float)count;
-		mismatchDetected = ((float)maxError > m_maxErrorLimit) ? true : false;
-		mismatchDetected = ((float)avgError > m_avgErrorLimit) ? true : mismatchDetected;
+		mismatchDetected = true;
+		if (((float)maxError <= m_maxErrorLimit) && ((float)avgError <= m_avgErrorLimit))
+		    mismatchDetected = false;
 		if (mismatchDetected)
 			printf("ERROR: tensor COMPARE MISMATCHED [max-err: %d] [avg-err: %.6f] for %s with frame#%d of %s\n", maxError, avgError, GetVxObjectName(), frameNumber, fileName);
 		else if (m_verbose)
@@ -336,8 +355,9 @@ int CVxParamTensor::CompareFrame(int frameNumber)
 		}
 		vx_size count = m_dims[0] * m_dims[1] * m_dims[2] * m_dims[3];
 		float avgError = (float)sumError / (float)count;
-		mismatchDetected = (maxError > m_maxErrorLimit) ? true : false;
-		mismatchDetected = (avgError > m_avgErrorLimit) ? true : mismatchDetected;
+		mismatchDetected = true;
+		if ((maxError <= m_maxErrorLimit) && (avgError <= m_avgErrorLimit))
+		    mismatchDetected = false;
 		if (mismatchDetected)
 			printf("ERROR: tensor COMPARE MISMATCHED [max-err: %.6f] [avg-err: %.6f] for %s with frame#%d of %s\n", maxError, avgError, GetVxObjectName(), frameNumber, fileName);
 		else if (m_verbose)
@@ -370,8 +390,9 @@ int CVxParamTensor::CompareFrame(int frameNumber)
 		}
 		vx_size count = m_dims[0] * m_dims[1] * m_dims[2] * m_dims[3];
 		float avgError = (float)sumError / (float)count;
-		mismatchDetected = (maxError > m_maxErrorLimit) ? true : false;
-		mismatchDetected = (avgError > m_avgErrorLimit) ? true : mismatchDetected;
+		mismatchDetected = true;
+		if ((maxError <= m_maxErrorLimit) && (avgError <= m_avgErrorLimit))
+		    mismatchDetected = false;
 		if (mismatchDetected)
 			printf("ERROR: tensor COMPARE MISMATCHED [max-err: %.6f] [avg-err: %.6f] for %s with frame#%d of %s\n", maxError, avgError, GetVxObjectName(), frameNumber, fileName);
 		else if (m_verbose)

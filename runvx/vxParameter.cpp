@@ -341,9 +341,9 @@ CVxParameter * CreateDataObject(vx_context context, vx_graph graph, vx_reference
 {
 	// create the object based on the ref
 	vx_enum type;
-	vx_status status = vxQueryReference(ref, VX_REF_ATTRIBUTE_TYPE, &type, sizeof(type));
+	vx_status status = vxQueryReference(ref, VX_REFERENCE_TYPE, &type, sizeof(type));
 	if (status) {
-		printf("ERROR: CreateDataObject: vxQueryReference(*,VX_REF_ATTRIBUTE_TYPE,...) failed(%d)\n", status);
+		printf("ERROR: CreateDataObject: vxQueryReference(*,VX_REFERENCE_TYPE,...) failed(%d)\n", status);
 		throw -1;
 	}
 	if (type == VX_TYPE_IMAGE) {
@@ -556,6 +556,14 @@ const char * ScanParameters(const char * s_, const char * syntax, const char * f
 						*p++ = *s++;
 					*p = 0;
 					if(*s == '"') s++;
+				}
+				else if (s[0] == '{') {
+					*p++ = *s++;
+					// copy till end of the string.
+					for (; (*s != '\0') && (*s != '}') && (--maxStringBufferLength > 2);)
+						*p++ = *s++;
+					if (*s == '}') *p++ = *s++;
+					*p = 0;
 				}
 				else {
 					if (!_strnicmp(s, "https://", 8) || !_strnicmp(s, "http://", 7) || !_strnicmp(s, "file://", 7) ||

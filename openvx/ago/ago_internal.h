@@ -34,7 +34,7 @@ THE SOFTWARE.
 //
 
 // version
-#define AGO_VERSION "0.9.6"
+#define AGO_VERSION "0.9.7"
 
 // debug configuration
 #define ENABLE_DEBUG_MESSAGES                 0 // 0:disable 1:enable
@@ -157,6 +157,10 @@ THE SOFTWARE.
 // thread scheduling configuration
 #define CONFIG_THREAD_DEFAULT                 1  // 0:disable 1:enable separate threads for graph scheduling
 
+// module specific
+#define MAX_MODULE_NAME_SIZE 256
+#define MAX_MODULE_PATH_SIZE 1024
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // helpful macros
 //
@@ -261,7 +265,8 @@ struct AgoConfigImage {
 	vx_uint32 height;
 	vx_df_image format;
 	vx_uint32 stride_in_bytes;
-	vx_size pixel_size_in_bits;
+	vx_uint32 pixel_size_in_bits_num;
+	vx_uint32 pixel_size_in_bits_denom;
 	vx_size components;
 	vx_size planes;
 	vx_bool isVirtual;
@@ -413,10 +418,12 @@ struct AgoData {
 	std::list<MappedData> mapped;
 	vx_map_id nextMapId;
 	vx_uint32 hierarchical_level;
-	vx_uint32 hierarchical_life_start;
-	vx_uint32 hierarchical_life_end;
 	struct AgoNode * ownerOfUserBufferOpenCL;
 	std::list<AgoData *> roiDepList;
+	vx_uint32 hierarchical_life_start;
+	vx_uint32 hierarchical_life_end;
+	vx_uint32 initialization_flags;
+	vx_uint32 device_type_unused;
 public:
 	AgoData();
 	~AgoData();
@@ -474,7 +481,7 @@ struct AgoKernel {
 	amd_kernel_opencl_global_work_update_callback_f opencl_global_work_update_callback_f;
 	amd_kernel_opencl_buffer_update_callback_f opencl_buffer_update_callback_f;
 	vx_uint32 opencl_buffer_update_param_index;
-	vx_bool opencl_image_access_enable;
+	vx_bool opencl_buffer_access_enable;
 	vx_uint32 importing_module_index_plus1;
 public:
 	AgoKernel();
@@ -503,8 +510,11 @@ struct AgoSuperNode {
 	cl_program opencl_program;
 	cl_kernel opencl_kernel;
 	cl_event opencl_event;
-	size_t opencl_global_work[2];
+	size_t opencl_global_work[3];
+	size_t opencl_local_work[3];
 #endif
+	vx_uint32 hierarchical_level_start;
+	vx_uint32 hierarchical_level_end;
 	vx_status status;
 	vx_perf_t perf;
 public:
@@ -531,6 +541,7 @@ struct AgoNode {
 	vx_nodecomplete_f callback;
 	AgoSuperNode * supernode;
 	bool initialized;
+	bool drama_divide_invoked;
 	vx_uint32 valid_rect_num_inputs;
 	vx_uint32 valid_rect_num_outputs;
 	vx_rectangle_t ** valid_rect_inputs;
@@ -611,11 +622,13 @@ struct AgoGraph {
 	AgoSuperNode * supernodeList;
 	cl_command_queue opencl_cmdq;
 	cl_device_id opencl_device;
+	bool enable_node_level_opencl_flush;
 #endif
 	AgoTargetAffinityInfo_ attr_affinity;
 	vx_uint32 execFrameCount;
 	bool enable_performance_profiling;
 	std::vector<AgoProfileEntry> performance_profile;
+	std::map<std::string,void *> moduleHandle;
 public:
 	AgoGraph();
 	~AgoGraph();
@@ -630,8 +643,8 @@ struct AgoImageFormatDescItem {
 	AgoImageFormatDescription desc;
 };
 struct ModuleData {
-	char module_name[256];
-	char module_path[1024];
+	char module_name[MAX_MODULE_NAME_SIZE];
+	char module_path[MAX_MODULE_PATH_SIZE];
 	ago_module hmodule;
 	vx_uint8 * module_internal_data_ptr;
 	vx_size module_internal_data_size;
@@ -677,6 +690,7 @@ struct AgoContext {
 #if defined(CL_VERSION_2_0)
 	cl_device_svm_capabilities opencl_svmcaps;
 #endif
+    cl_command_queue_properties opencl_cmdq_properties;
 	cl_uint      opencl_num_devices;
 	cl_device_id opencl_device_list[16];
 	char opencl_build_options[256];
@@ -752,8 +766,8 @@ AgoData * agoCreateDataFromDescription(AgoContext * acontext, AgoGraph * agraph,
 void agoGenerateDataName(AgoContext * acontext, const char * postfix, std::string& name);
 void agoGenerateVirtualDataName(AgoGraph * agraph, const char * postfix, std::string& name);
 int agoInitializeImageComponentsAndPlanes(AgoContext * acontext);
-int agoSetImageComponentsAndPlanes(AgoContext * acontext, vx_df_image format, vx_size components, vx_size planes, vx_size pixelSizeInBits, vx_color_space_e colorSpace, vx_channel_range_e channelRange);
-int agoGetImageComponentsAndPlanes(AgoContext * acontext, vx_df_image format, vx_size * pComponents, vx_size * pPlanes, vx_size * pPixelSizeInBits, vx_color_space_e * pColorSpace, vx_channel_range_e * pChannelRange);
+int agoSetImageComponentsAndPlanes(AgoContext * acontext, vx_df_image format, vx_size components, vx_size planes, vx_uint32 pixelSizeInBitsNum, vx_uint32 pixelSizeInBitsDenom, vx_color_space_e colorSpace, vx_channel_range_e channelRange);
+int agoGetImageComponentsAndPlanes(AgoContext * acontext, vx_df_image format, vx_size * pComponents, vx_size * pPlanes, vx_uint32 * pPixelSizeInBitsNum, vx_uint32 * pPixelSizeInBitsDenom, vx_color_space_e * pColorSpace, vx_channel_range_e * pChannelRange);
 int agoGetImagePlaneFormat(AgoContext * acontext, vx_df_image format, vx_uint32 width, vx_uint32 height, vx_uint32 plane, vx_df_image *pFormat, vx_uint32 * pWidth, vx_uint32 * pHeight);
 void agoGetDataName(vx_char * name, AgoData * data);
 int agoAllocData(AgoData * data);
@@ -810,8 +824,9 @@ int agoGpuOclReleaseSuperNode(AgoSuperNode * supernode);
 int agoGpuOclReleaseData(AgoData * data);
 int agoGpuOclCreateContext(AgoContext * context, cl_context opencl_context);
 int agoGpuOclAllocBuffer(AgoData * data);
-int agoGpuOclAllocBuffers(AgoGraph * graph, AgoNode * node);
+int agoGpuOclAllocBuffers(AgoGraph * graph);
 int agoGpuOclSuperNodeMerge(AgoGraph * graph, AgoSuperNode * supernode, AgoNode * node);
+int agoGpuOclSuperNodeUpdate(AgoGraph * graph, AgoSuperNode * supernode);
 int agoGpuOclSuperNodeFinalize(AgoGraph * graph, AgoSuperNode * supernode);
 int agoGpuOclSuperNodeLaunch(AgoGraph * graph, AgoSuperNode * supernode);
 int agoGpuOclSuperNodeWait(AgoGraph * graph, AgoSuperNode * supernode);
@@ -870,6 +885,16 @@ inline int leftmostbit(unsigned int n) {
 	while (pos >= 0 && !(n & (1 << pos)))
 		pos--;
 	return pos;
+}
+
+inline vx_uint32 ImageWidthInBytesFloor(vx_uint32 width, const AgoData * img)
+{
+    return ((width * img->u.img.pixel_size_in_bits_num + img->u.img.pixel_size_in_bits_denom - 1) / img->u.img.pixel_size_in_bits_denom) >> 3;
+}
+
+inline vx_uint32 ImageWidthInBytesCeil(vx_uint32 width, const AgoData * img)
+{
+    return ((width * img->u.img.pixel_size_in_bits_num + img->u.img.pixel_size_in_bits_denom - 1) / img->u.img.pixel_size_in_bits_denom + 7) >> 3;
 }
 
 #endif // __ago_internal_h__

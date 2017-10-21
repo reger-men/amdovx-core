@@ -92,7 +92,33 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetContextImageFormatDescription(vx_context
 	vx_status status = VX_ERROR_INVALID_REFERENCE;
 	if (agoIsValidContext(context)) {
 		status = VX_ERROR_INVALID_FORMAT;
-		if (desc->planes == 1 && !agoSetImageComponentsAndPlanes(context, format, desc->components, desc->planes, desc->pixelSizeInBits, desc->colorSpace, desc->channelRange)) {
+		if (desc->planes == 1 && !agoSetImageComponentsAndPlanes(context, format, desc->components, desc->planes, (vx_uint32)desc->pixelSizeInBitsNum, (vx_uint32)(desc->pixelSizeInBitsDenom ? desc->pixelSizeInBitsDenom : 1), desc->colorSpace, desc->channelRange)) {
+			status = VX_SUCCESS;
+		}
+	}
+	return status;
+}
+
+/**
+* \brief Get custom image format description.
+* \ingroup vx_framework_reference
+* \param [in] context The context.
+* \param [in] format The image format.
+* \param [out] desc The image format description.
+* \return A \ref vx_status_e enumeration.
+* \retval VX_SUCCESS No errors.
+* \retval VX_ERROR_INVALID_REFERENCE if reference is not valid.
+* \retval VX_ERROR_INVALID_FORMAT if format is already in use.
+*/
+VX_API_ENTRY vx_status VX_API_CALL vxGetContextImageFormatDescription(vx_context context, vx_df_image format, AgoImageFormatDescription * desc)
+{
+	vx_status status = VX_ERROR_INVALID_REFERENCE;
+	if (agoIsValidContext(context)) {
+		status = VX_ERROR_INVALID_FORMAT;
+		vx_uint32 pixelSizeInBitsNum, pixelSizeInBitsDenom;
+		if (!agoGetImageComponentsAndPlanes(context, format, &desc->components, &desc->planes, &pixelSizeInBitsNum, &pixelSizeInBitsDenom, &desc->colorSpace, &desc->channelRange)) {
+			desc->pixelSizeInBitsNum = pixelSizeInBitsNum;
+			desc->pixelSizeInBitsDenom = pixelSizeInBitsDenom;
 			status = VX_SUCCESS;
 		}
 	}
@@ -235,6 +261,12 @@ VX_API_ENTRY vx_status VX_API_CALL vxQueryContext(vx_context context, vx_enum at
 					status = VX_SUCCESS;
 				}
 				break;
+			case VX_CONTEXT_CL_QUEUE_PROPERTIES:
+				if (size == sizeof(cl_command_queue_properties)) {
+					*(cl_command_queue_properties *)ptr = context->opencl_cmdq_properties;
+					status = VX_SUCCESS;
+				}
+				break;
 #endif
 			case VX_CONTEXT_MAX_TENSOR_DIMENSIONS:
 				if (size == sizeof(vx_size)) {
@@ -329,6 +361,12 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetContextAttribute(vx_context context, vx_
 					else {
 						status = VX_FAILURE;
 					}
+				}
+				break;
+			case VX_CONTEXT_CL_QUEUE_PROPERTIES:
+				if (size == sizeof(cl_command_queue_properties)) {
+					context->opencl_cmdq_properties = *(cl_command_queue_properties *)ptr;
+					status = VX_SUCCESS;
 				}
 				break;
 #endif
@@ -884,7 +922,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxSwapImageHandle(vx_image image_, void* cons
 					for (auto roi = image->children[i]->roiDepList.begin(); roi != image->children[i]->roiDepList.end(); roi++) {
 						(*roi)->buffer = image->children[i]->buffer +
 							image->children[i]->u.img.rect_roi.start_y * image->children[i]->u.img.stride_in_bytes +
-							((image->children[i]->u.img.rect_roi.start_x * image->children[i]->u.img.pixel_size_in_bits) >> 3);
+							ImageWidthInBytesFloor(image->children[i]->u.img.rect_roi.start_x, image->children[i]);
 					}
 				}
 			}
@@ -899,7 +937,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxSwapImageHandle(vx_image image_, void* cons
 				for (auto roi = image->roiDepList.begin(); roi != image->roiDepList.end(); roi++) {
 					(*roi)->buffer = image->buffer +
 						image->u.img.rect_roi.start_y * image->u.img.stride_in_bytes +
-						((image->u.img.rect_roi.start_x * image->u.img.pixel_size_in_bits) >> 3);
+						ImageWidthInBytesFloor(image->u.img.rect_roi.start_x, image);
 				}
 			}
 		}
@@ -1173,8 +1211,8 @@ VX_API_ENTRY vx_size VX_API_CALL vxComputeImagePatchSize(vx_image image_,
 		if (image->children) {
 			img = image->children[plane_index];
 		}
-		size = (((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2) * 
-			    ((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2) * img->u.img.pixel_size_in_bits) >> 3;
+		size = ImageWidthInBytesFloor(((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2), img) *
+			    ((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2);
 	}
 	return size;
 }
@@ -1241,12 +1279,13 @@ VX_API_ENTRY vx_status VX_API_CALL vxAccessImagePatch(vx_image image_,
 				addr->scale_y = VX_SCALE_UNITY >> img->u.img.y_scale_factor_is_2;
 				addr->step_x = 1 << img->u.img.x_scale_factor_is_2;
 				addr->step_y = 1 << img->u.img.y_scale_factor_is_2;
-				addr->stride_x = ((vx_uint32)img->u.img.pixel_size_in_bits + 7) >> 3;
+				addr->stride_x = ((img->u.img.pixel_size_in_bits_num & 7) || (img->u.img.pixel_size_in_bits_denom > 1)) ?
+					0 : (img->u.img.pixel_size_in_bits_num >> 3);
 				addr->stride_y = img->u.img.stride_in_bytes;
 			}
 			vx_uint8 * ptr_internal = img->buffer + 
 				(rect->start_y >> img->u.img.y_scale_factor_is_2) * img->u.img.stride_in_bytes + 
-				(((rect->start_x >> img->u.img.x_scale_factor_is_2) * img->u.img.pixel_size_in_bits) >> 3);
+				ImageWidthInBytesFloor((rect->start_x >> img->u.img.x_scale_factor_is_2), img);
 			vx_uint8 * ptr_returned = *ptr ? (vx_uint8 *)*ptr : ptr_internal;
 			// save the pointer and usage for use in vxCommitImagePatch
 			status = VX_SUCCESS;
@@ -1279,12 +1318,12 @@ VX_API_ENTRY vx_status VX_API_CALL vxAccessImagePatch(vx_image image_,
 #endif
 					if (item.used_external_ptr) {
 						// copy if read is requested with explicit external buffer
-						if (addr->stride_x == ((vx_uint32)img->u.img.pixel_size_in_bits + 7) >> 3)
-							HafCpu_ChannelCopy_U8_U8(((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2) * addr->stride_x, ((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2),
-							ptr_returned, addr->stride_y, ptr_internal, img->u.img.stride_in_bytes);
+						if (addr->stride_x == 0 || ((addr->stride_x << 3) == img->u.img.pixel_size_in_bits_num && img->u.img.pixel_size_in_bits_denom == 1))
+							HafCpu_ChannelCopy_U8_U8(ImageWidthInBytesFloor((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2, img),
+								((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2), ptr_returned, addr->stride_y, ptr_internal, img->u.img.stride_in_bytes);
 						else
 							HafCpu_BufferCopyDisperseInDst(((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2), ((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2),
-							((vx_uint32)img->u.img.pixel_size_in_bits + 7) >> 3, ptr_returned, addr->stride_y, addr->stride_x, ptr_internal, img->u.img.stride_in_bytes);
+							    (img->u.img.pixel_size_in_bits_num / img->u.img.pixel_size_in_bits_denom + 7) >> 3, ptr_returned, addr->stride_y, addr->stride_x, ptr_internal, img->u.img.stride_in_bytes);
 					}
 				}
 			}
@@ -1362,14 +1401,14 @@ VX_API_ENTRY vx_status VX_API_CALL vxCommitImagePatch(vx_image image_,
 					if (used_external_ptr) {
 						// copy from external buffer
 						vx_uint8 * buffer = img->buffer + (rect->start_y >> img->u.img.y_scale_factor_is_2) * img->u.img.stride_in_bytes + 
-							(((rect->start_x >> img->u.img.x_scale_factor_is_2) * img->u.img.pixel_size_in_bits) >> 3);
+							ImageWidthInBytesFloor((rect->start_x >> img->u.img.x_scale_factor_is_2), img);
 
-						if (addr->stride_x == ((vx_uint32)img->u.img.pixel_size_in_bits + 7) >> 3)
-							HafCpu_ChannelCopy_U8_U8(((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2) * addr->stride_x, ((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2),
-							buffer, img->u.img.stride_in_bytes, (vx_uint8 *)ptr, addr->stride_y);
+						if (addr->stride_x == 0 || ((addr->stride_x << 3) == img->u.img.pixel_size_in_bits_num && img->u.img.pixel_size_in_bits_denom == 1))
+							HafCpu_ChannelCopy_U8_U8(ImageWidthInBytesFloor(((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2), img),
+								((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2), buffer, img->u.img.stride_in_bytes, (vx_uint8 *)ptr, addr->stride_y);
 						else
 							HafCpu_BufferCopyDisperseInSrc(((rect->end_x - rect->start_x) >> img->u.img.x_scale_factor_is_2) * addr->stride_x, ((rect->end_y - rect->start_y) >> img->u.img.y_scale_factor_is_2),
-							((vx_uint32)img->u.img.pixel_size_in_bits + 7) >> 3, buffer, img->u.img.stride_in_bytes, (vx_uint8 *)ptr, addr->stride_y, addr->stride_x);
+							(img->u.img.pixel_size_in_bits_num / img->u.img.pixel_size_in_bits_denom + 7) >> 3, buffer, img->u.img.stride_in_bytes, (vx_uint8 *)ptr, addr->stride_y, addr->stride_x);
 					}
 					// update sync flags
 					auto dataToSync = img->u.img.isROI ? img->u.img.roiMasterImage : img;
@@ -1602,7 +1641,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxMapImagePatch(vx_image image_, const vx_rec
 			}
 			vx_uint8 * ptr_returned = img->buffer +
 				(rect->start_y >> img->u.img.y_scale_factor_is_2) * img->u.img.stride_in_bytes +
-				(((rect->start_x >> img->u.img.x_scale_factor_is_2) * img->u.img.pixel_size_in_bits) >> 3);
+				ImageWidthInBytesFloor((rect->start_x >> img->u.img.x_scale_factor_is_2), img);
 			// save the pointer and usage for use in vxCommitImagePatch
 			status = VX_SUCCESS;
 			for (auto i = img->mapped.begin(); i != img->mapped.end(); i++) {
@@ -1641,7 +1680,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxMapImagePatch(vx_image image_, const vx_rec
 				addr->scale_y = VX_SCALE_UNITY >> img->u.img.y_scale_factor_is_2;
 				addr->step_x = 1 << img->u.img.x_scale_factor_is_2;
 				addr->step_y = 1 << img->u.img.y_scale_factor_is_2;
-				addr->stride_x = ((vx_uint32)img->u.img.pixel_size_in_bits + 7) >> 3;
+				addr->stride_x = (img->u.img.pixel_size_in_bits_denom > 1 || (img->u.img.pixel_size_in_bits_num & 7)) ? 0 : (img->u.img.pixel_size_in_bits_num >> 3);
 				addr->stride_y = img->u.img.stride_in_bytes;
 			}
 		}
@@ -1698,8 +1737,8 @@ VX_API_ENTRY vx_status VX_API_CALL vxUnmapImagePatch(vx_image image_, vx_map_id 
 * The function supports only channels that occupy an entire plane of a multi-planar
 * images, as listed below. Other cases are not supported.
 *     VX_CHANNEL_Y from YUV4, IYUV, NV12, NV21
-*     VX_CHANNEL_U from YUV4, IYUV
-*     VX_CHANNEL_V from YUV4, IYUV
+*     VX_CHANNEL_U from YUV4, IYUV, NV12, NV21
+*     VX_CHANNEL_V from YUV4, IYUV, NV12, NV21
 *
 * \param [in] img          The reference to the parent image.
 * \param [in] channel      The <tt>\ref vx_channel_e</tt> channel to use.
@@ -1727,6 +1766,10 @@ VX_API_ENTRY vx_image VX_API_CALL vxCreateImageFromChannel(vx_image img, vx_enum
 			else if (channel == VX_CHANNEL_V && (image->u.img.format == VX_DF_IMAGE_YUV4 || image->u.img.format == VX_DF_IMAGE_IYUV))
 			{
 				subImage = image->children[2];
+			}
+			else if ((channel == VX_CHANNEL_U || channel == VX_CHANNEL_V) && (image->u.img.format == VX_DF_IMAGE_NV12 || image->u.img.format == VX_DF_IMAGE_NV21))
+			{
+				subImage = image->children[1];
 			}
 		}
 	}
@@ -2247,10 +2290,10 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetKernelAttribute(vx_kernel kernel, vx_enu
 					}
 				}
 				break;
-			case VX_KERNEL_ATTRIBUTE_AMD_OPENCL_IMAGE_ACCESS_ENABLE:
+			case VX_KERNEL_ATTRIBUTE_AMD_OPENCL_BUFFER_ACCESS_ENABLE:
 				if (size == sizeof(vx_bool)) {
 					if (!kernel->finalized && !kernel->opencl_buffer_update_callback_f) {
-						kernel->opencl_image_access_enable = *(vx_bool *)ptr;
+						kernel->opencl_buffer_access_enable = *(vx_bool *)ptr;
 						status = VX_SUCCESS;
 					}
 					else {
@@ -2274,7 +2317,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetKernelAttribute(vx_kernel kernel, vx_enu
 						else {
 							kernel->opencl_buffer_update_callback_f = info->opencl_buffer_update_callback_f;
 							kernel->opencl_buffer_update_param_index = info->opencl_buffer_update_param_index;
-							kernel->opencl_image_access_enable = vx_true_e;
+							kernel->opencl_buffer_access_enable = vx_true_e;
 							status = VX_SUCCESS;
 						}
 					}
@@ -2844,6 +2887,15 @@ VX_API_ENTRY vx_status VX_API_CALL vxQueryNode(vx_node node, vx_enum attribute, 
 					status = VX_SUCCESS;
 				}
 				break;
+#if ENABLE_OPENCL
+			case VX_NODE_ATTRIBUTE_AMD_OPENCL_COMMAND_QUEUE:
+				if (size == sizeof(cl_command_queue)) {
+					AgoGraph * graph = (AgoGraph *)node->ref.scope;
+					*(cl_command_queue *)ptr = graph->opencl_cmdq;
+					status = VX_SUCCESS;
+				}
+				break;
+#endif
 			default:
 				status = VX_ERROR_NOT_SUPPORTED;
 				break;
@@ -3181,7 +3233,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetParameterByIndex(vx_node node, vx_uint32
 		else if (node->parameters[index].state == VX_PARAMETER_STATE_REQUIRED && !value) {
 			status = VX_ERROR_INVALID_REFERENCE;
 		}
-		else if ((index < node->paramCount) && (!node->parameters[index].type || !value || node->parameters[index].type == value->type)) {
+		else if ((index < node->paramCount) && (!node->parameters[index].type || !value || node->parameters[index].type == value->type || node->parameters[index].type == VX_TYPE_REFERENCE)) {
 			if (node->paramList[index]) {
 				agoReleaseData(node->paramList[index], false);
 			}
@@ -3308,104 +3360,125 @@ SCALAR
 */
 VX_API_ENTRY vx_scalar VX_API_CALL vxCreateScalar(vx_context context, vx_enum data_type, const void *ptr)
 {
-	AgoData * data = NULL;
-	if (agoIsValidContext(context)) {
-		CAgoLock lock(context->cs);
-		data = agoCreateDataFromDescription(context, NULL, "scalar:UINT32,0", true);
-		if (data) {
-			agoAddData(&context->dataList, data);
-			data->u.scalar.type = data_type;
-			switch (data_type) {
-			case VX_TYPE_ENUM:
-				data->u.scalar.itemsize = sizeof(vx_enum);
-				if (ptr) data->u.scalar.u.e = *(vx_enum *)ptr;
-				break;
-			case VX_TYPE_UINT32:
-				data->u.scalar.itemsize = sizeof(vx_uint32);
-				if (ptr) data->u.scalar.u.u = *(vx_uint32 *)ptr;
-				break;
-			case VX_TYPE_INT32:
-				data->u.scalar.itemsize = sizeof(vx_int32);
-				if (ptr) data->u.scalar.u.i = *(vx_int32 *)ptr;
-				break;
-			case VX_TYPE_UINT16:
-				data->u.scalar.itemsize = sizeof(vx_uint16);
-				if (ptr) data->u.scalar.u.u = *(vx_uint16 *)ptr;
-				break;
-			case VX_TYPE_INT16:
-				data->u.scalar.itemsize = sizeof(vx_int16);
-				if (ptr) data->u.scalar.u.i = *(vx_int16 *)ptr;
-				break;
-			case VX_TYPE_UINT8:
-				data->u.scalar.itemsize = sizeof(VX_TYPE_UINT8);
-				if (ptr) data->u.scalar.u.u = *(vx_uint8 *)ptr;
-				break;
-			case VX_TYPE_INT8:
-				data->u.scalar.itemsize = sizeof(VX_TYPE_INT8);
-				if (ptr) data->u.scalar.u.i = *(vx_int8 *)ptr;
-				break;
-			case VX_TYPE_CHAR:
-				data->u.scalar.itemsize = sizeof(VX_TYPE_CHAR);
-				if (ptr) data->u.scalar.u.i = *(vx_char *)ptr;
-				break;
-			case VX_TYPE_FLOAT32:
-				data->u.scalar.itemsize = sizeof(vx_float32);
-				if (ptr) data->u.scalar.u.f = *(vx_float32 *)ptr;
-				break;
-			case VX_TYPE_FLOAT16:
-				data->u.scalar.itemsize = sizeof(vx_uint16);
-				if (ptr) data->u.scalar.u.u = *(vx_uint16 *)ptr;
-				break;
-			case VX_TYPE_SIZE:
-				data->u.scalar.itemsize = sizeof(vx_size);
-				if (ptr) data->u.scalar.u.s = *(vx_size *)ptr;
-				break;
-			case VX_TYPE_BOOL:
-				data->u.scalar.itemsize = sizeof(vx_bool);
-				if (ptr) data->u.scalar.u.u = *(vx_bool *)ptr;
-				break;
-			case VX_TYPE_DF_IMAGE:
-				data->u.scalar.itemsize = sizeof(vx_df_image);
-				if (ptr) data->u.scalar.u.df = *(vx_df_image *)ptr;
-				break;
-			case VX_TYPE_FLOAT64:
-				data->u.scalar.itemsize = sizeof(vx_float64);
-				if (ptr) data->u.scalar.u.f64 = *(vx_float64 *)ptr;
-				break;
-			case VX_TYPE_INT64:
-				data->u.scalar.itemsize = sizeof(vx_int64);
-				if (ptr) data->u.scalar.u.i64 = *(vx_int64 *)ptr;
-				break;
-			case VX_TYPE_UINT64:
-				data->u.scalar.itemsize = sizeof(vx_uint64);
-				if (ptr) data->u.scalar.u.u64 = *(vx_uint64 *)ptr;
-				break;
-			case VX_TYPE_STRING_AMD: {
-					data->u.scalar.itemsize = sizeof(char *);
-					data->size = VX_MAX_STRING_BUFFER_SIZE_AMD;
-					data->buffer_allocated = data->buffer = (vx_uint8 *)agoAllocMemory(data->size);
-					if (data->buffer_allocated) {
-						data->buffer[0] = 0;
-						if (ptr) {
-							strncpy((char *)data->buffer, (const char *)ptr, VX_MAX_STRING_BUFFER_SIZE_AMD);
-							data->buffer[VX_MAX_STRING_BUFFER_SIZE_AMD - 1] = 0; // NUL terminate string in case of overflow
-						}
-						data->isInitialized = vx_true_e;
-					}
-					else {
-						agoReleaseData(data, true);
-						data = NULL;
-					}
-				}
-				break;
-			default:
-				agoReleaseData(data, true);
-				data = NULL;
-				break;
-			}
-		}
-	}
-	return (vx_scalar)data;
+    AgoData * data = NULL;
+    if (agoIsValidContext(context)) {
+        CAgoLock lock(context->cs);
+        vx_size size = agoType2Size(context, data_type);
+        if(size > 0 || data_type == VX_TYPE_STRING_AMD) {
+            data = (AgoData *)vxCreateScalarWithSize(context, data_type, ptr, size);
+        }
+    }
+    return (vx_scalar)data;
+}
+
+/*! \brief Creates a reference to a scalar object. Also see \ref sub_node_parameters.
+ * \param [in] context The reference to the system context.
+ * \param [in] data_type The type of data to hold. Must be greater than
+ * <tt>\ref VX_TYPE_INVALID</tt> and less than or equal to <tt>\ref VX_TYPE_VENDOR_STRUCT_END</tt>.
+ * Or must be a <tt>\ref vx_enum</tt> returned from <tt>\ref vxRegisterUserStruct</tt>.
+ * \param [in] ptr The pointer to the initial value of the scalar.
+ * \param [in] size Size of data at ptr in bytes.
+ * \ingroup group_scalar
+ * \returns A scalar reference <tt>\ref vx_scalar</tt>. Any possible errors preventing a
+ * successful creation should be checked using <tt>\ref vxGetStatus</tt>.
+ */
+VX_API_ENTRY vx_scalar VX_API_CALL vxCreateScalarWithSize(vx_context context, vx_enum data_type, const void *ptr, vx_size size)
+{
+    AgoData * data = NULL;
+    if (agoIsValidContext(context)) {
+        CAgoLock lock(context->cs);
+        vx_size data_size = 0;
+        if(data_type != VX_TYPE_STRING_AMD) {
+            data_size = agoType2Size(context, data_type);
+            if(data_size == 0 || data_size != size) {
+                return NULL;
+            }
+        }
+        data = agoCreateDataFromDescription(context, NULL, "scalar:UINT32,0", true);
+        if (data) {
+            agoAddData(&context->dataList, data);
+            data->u.scalar.type = data_type;
+            data->u.scalar.itemsize = size;
+            switch (data_type) {
+            case VX_TYPE_ENUM:
+                if (ptr) data->u.scalar.u.e = *(vx_enum *)ptr;
+                break;
+            case VX_TYPE_UINT32:
+                if (ptr) data->u.scalar.u.u = *(vx_uint32 *)ptr;
+                break;
+            case VX_TYPE_INT32:
+                if (ptr) data->u.scalar.u.i = *(vx_int32 *)ptr;
+                break;
+            case VX_TYPE_UINT16:
+                if (ptr) data->u.scalar.u.u = *(vx_uint16 *)ptr;
+                break;
+            case VX_TYPE_INT16:
+                if (ptr) data->u.scalar.u.i = *(vx_int16 *)ptr;
+                break;
+            case VX_TYPE_UINT8:
+                if (ptr) data->u.scalar.u.u = *(vx_uint8 *)ptr;
+                break;
+            case VX_TYPE_INT8:
+                if (ptr) data->u.scalar.u.i = *(vx_int8 *)ptr;
+                break;
+            case VX_TYPE_CHAR:
+                if (ptr) data->u.scalar.u.i = *(vx_char *)ptr;
+                break;
+            case VX_TYPE_FLOAT32:
+                if (ptr) data->u.scalar.u.f = *(vx_float32 *)ptr;
+                break;
+            case VX_TYPE_FLOAT16:
+                if (ptr) data->u.scalar.u.u = *(vx_uint16 *)ptr;
+                break;
+            case VX_TYPE_SIZE:
+                if (ptr) data->u.scalar.u.s = *(vx_size *)ptr;
+                break;
+            case VX_TYPE_BOOL:
+                if (ptr) data->u.scalar.u.u = *(vx_bool *)ptr;
+                break;
+            case VX_TYPE_DF_IMAGE:
+                if (ptr) data->u.scalar.u.df = *(vx_df_image *)ptr;
+                break;
+            case VX_TYPE_FLOAT64:
+                if (ptr) data->u.scalar.u.f64 = *(vx_float64 *)ptr;
+                break;
+            case VX_TYPE_INT64:
+                if (ptr) data->u.scalar.u.i64 = *(vx_int64 *)ptr;
+                break;
+            case VX_TYPE_UINT64:
+                if (ptr) data->u.scalar.u.u64 = *(vx_uint64 *)ptr;
+                break;
+            default:
+                if(data_type == VX_TYPE_STRING_AMD) {
+                    data->u.scalar.itemsize = sizeof(char *);
+                    data->size = VX_MAX_STRING_BUFFER_SIZE_AMD;
+                }
+                else {
+                    data->u.scalar.itemsize = data->size = data_size;
+                }
+                data->buffer_allocated = data->buffer = (vx_uint8 *)agoAllocMemory(data->size);
+                if (data->buffer) {
+                    memset(data->buffer, 0, data->size);
+                    if (ptr) {
+                        if(data_type == VX_TYPE_STRING_AMD) {
+                            strncpy((char *)data->buffer, (const char *)ptr, VX_MAX_STRING_BUFFER_SIZE_AMD);
+                            data->buffer[VX_MAX_STRING_BUFFER_SIZE_AMD - 1] = 0; // NUL terminate string in case of overflow
+                        }
+                        else {
+                            memcpy(data->buffer, ptr, size);
+                        }
+                    }
+                    data->isInitialized = vx_true_e;
+                }
+                else {
+                    agoReleaseData(data, true);
+                    data = NULL;
+                }
+                break;
+            }
+        }
+    }
+    return (vx_scalar)data;
 }
 
 /*! \brief Releases a reference to a scalar object.
@@ -3533,6 +3606,10 @@ VX_API_ENTRY vx_status VX_API_CALL vxReadScalarValue(vx_scalar ref, void *ptr)
 				strcpy((char *)ptr, (const char *)data->buffer);
 				break;
 			default:
+				if (data->buffer) {
+					memcpy(ptr, data->buffer, data->size);
+					break;
+				}
 				status = VX_ERROR_NOT_SUPPORTED;
 				break;
 			}
@@ -3631,6 +3708,10 @@ VX_API_ENTRY vx_status VX_API_CALL vxWriteScalarValue(vx_scalar ref, const void 
 				data->isInitialized = vx_true_e;
 				break;
 			default:
+				if (ptr) {
+					memcpy(data->buffer,ptr, data->size);
+					break;
+				}
 				status = VX_ERROR_NOT_SUPPORTED;
 				break;
 			}
@@ -3696,13 +3777,13 @@ VX_API_ENTRY vx_status VX_API_CALL vxQueryReference(vx_reference ref, vx_enum at
 		if (ptr) {
 			switch (attribute)
 			{
-			case VX_REF_ATTRIBUTE_COUNT:
+			case VX_REFERENCE_COUNT:
 				if (size == sizeof(vx_uint32)) {
 					*(vx_uint32 *)ptr = ref->external_count;
 					status = VX_SUCCESS;
 				}
 				break;
-			case VX_REF_ATTRIBUTE_TYPE:
+			case VX_REFERENCE_TYPE:
 				if (size == sizeof(vx_enum)) {
 					*(vx_enum *)ptr = ref->type;
 					status = VX_SUCCESS;
@@ -6773,7 +6854,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetMetaFormatAttribute(vx_meta_format meta,
 				}
 				break;
 			/**********************************************************************/
-			case VX_TENSOR_NUM_OF_DIMS:
+			case VX_TENSOR_NUMBER_OF_DIMS:
 				if (size == sizeof(vx_size) && meta->data.ref.type == VX_TYPE_TENSOR) {
 					meta->data.u.tensor.num_dims = *(vx_size *)ptr;
 					status = VX_SUCCESS;
@@ -6791,9 +6872,9 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetMetaFormatAttribute(vx_meta_format meta,
 					status = VX_SUCCESS;
 				}
 				break;
-			case VX_TENSOR_FIXED_POINT_POS:
+			case VX_TENSOR_FIXED_POINT_POSITION:
 				if (size == sizeof(vx_uint8) && meta->data.ref.type == VX_TYPE_TENSOR) {
-					meta->data.u.tensor.fixed_point_pos = *(vx_uint8 *)ptr;
+					meta->data.u.tensor.fixed_point_pos = *(vx_int8 *)ptr;
 					status = VX_SUCCESS;
 				}
 				break;
@@ -6907,6 +6988,33 @@ VX_API_ENTRY vx_status VX_API_CALL vxSetModuleInternalData(vx_context context, c
 	return status;
 }
 
+VX_API_ENTRY vx_status VX_API_CALL vxGetModuleHandle(vx_node node, const vx_char * module, void ** ptr)
+{
+	vx_status status = VX_ERROR_INVALID_REFERENCE;
+	if (agoIsValidNode(node) && ptr) {
+		vx_graph graph = (AgoGraph *)node->ref.scope;
+        if(graph->moduleHandle.find(module) == graph->moduleHandle.end()) {
+            *ptr = NULL;
+        }
+        else {
+            *ptr = graph->moduleHandle[module];
+        }
+	    status = VX_SUCCESS;
+	}
+	return status;
+}
+
+VX_API_ENTRY vx_status VX_API_CALL vxSetModuleHandle(vx_node node, const vx_char * module, void * ptr)
+{
+	vx_status status = VX_ERROR_INVALID_REFERENCE;
+	if (agoIsValidNode(node)) {
+		vx_graph graph = (AgoGraph *)node->ref.scope;
+        graph->moduleHandle[module] = ptr;
+	    status = VX_SUCCESS;
+	}
+	return status;
+}
+
 //! \brief Create context from specified platform -- needed for ICD support
 extern "C" VX_API_ENTRY vx_context VX_API_CALL vxCreateContextFromPlatform(struct _vx_platform * platform);
 VX_API_ENTRY vx_context VX_API_CALL vxCreateContextFromPlatform(struct _vx_platform * platform)
@@ -6929,7 +7037,7 @@ TENSOR DATA FUNCTIONS
  * \return A tensor data reference or zero when an error is encountered.
  * \ingroup group_tensor
  */
-VX_API_ENTRY vx_tensor VX_API_CALL vxCreateTensor(vx_context context, vx_size num_of_dims, const vx_size * dims, vx_enum data_format, vx_uint8 fixed_point_pos)
+VX_API_ENTRY vx_tensor VX_API_CALL vxCreateTensor(vx_context context, vx_size num_of_dims, const vx_size * dims, vx_enum data_format, vx_int8 fixed_point_pos)
 {
 	AgoData * data = NULL;
 	if (agoIsValidContext(context) && num_of_dims > 0 && num_of_dims <= AGO_MAX_TENSOR_DIMENSIONS) {
@@ -6938,7 +7046,7 @@ VX_API_ENTRY vx_tensor VX_API_CALL vxCreateTensor(vx_context context, vx_size nu
 		for (vx_size i = 0; i < num_of_dims; i++)
 			sprintf(dimStr + strlen(dimStr), "%s%u", i ? "," : "", (vx_uint32)dims[i]);
 		char desc[512];
-		sprintf(desc, "tensor:%u,{%s},%s,%u", (vx_uint32)num_of_dims, dimStr, agoEnum2Name(data_format), fixed_point_pos);
+		sprintf(desc, "tensor:%u,{%s},%s,%d", (vx_uint32)num_of_dims, dimStr, agoEnum2Name(data_format), fixed_point_pos);
 		data = agoCreateDataFromDescription(context, NULL, desc, true);
 		if (data) {
 			agoGenerateDataName(context, "tensor", data->name);
@@ -6967,7 +7075,7 @@ VX_API_ENTRY vx_tensor VX_API_CALL vxCreateTensor(vx_context context, vx_size nu
  * \note Passing this reference to <tt>\ref vxCopyTensorPatch</tt> will return an error.
  * \ingroup group_tensor
  */
-VX_API_ENTRY vx_tensor VX_API_CALL vxCreateVirtualTensor(vx_graph graph, vx_size num_of_dims, const vx_size * dims, vx_enum data_format, vx_uint8 fixed_point_pos)
+VX_API_ENTRY vx_tensor VX_API_CALL vxCreateVirtualTensor(vx_graph graph, vx_size num_of_dims, vx_size * dims, vx_enum data_format, vx_int8 fixed_point_pos)
 {
 	AgoData * data = NULL;
 	if (agoIsValidGraph(graph) && num_of_dims > 0 && num_of_dims <= AGO_MAX_TENSOR_DIMENSIONS) {
@@ -6977,7 +7085,7 @@ VX_API_ENTRY vx_tensor VX_API_CALL vxCreateVirtualTensor(vx_graph graph, vx_size
 		for (vx_size i = 0; i < num_of_dims; i++)
 			sprintf(dimStr + strlen(dimStr), "%s%u", i ? "," : "", (vx_uint32)dims[i]);
 		char desc[512];
-		sprintf(desc, "tensor-virtual:%u,{%s},%s,%u", (vx_uint32)num_of_dims, dimStr, agoEnum2Name(data_format), fixed_point_pos);
+		sprintf(desc, "tensor-virtual:%u,{%s},%s,%i", (vx_uint32)num_of_dims, dimStr, agoEnum2Name(data_format), fixed_point_pos);
 		data = agoCreateDataFromDescription(context, graph, desc, true);
 		if (data) {
 			agoGenerateVirtualDataName(graph, "tensor", data->name);
@@ -6999,7 +7107,7 @@ VX_API_ENTRY vx_tensor VX_API_CALL vxCreateVirtualTensor(vx_graph graph, vx_size
  * \return The reference to the sub-tensor or zero if the view is invalid.
  * \ingroup group_tensor
  */
-VX_API_ENTRY vx_tensor VX_API_CALL vxCreateTensorFromROI(vx_tensor tensor, vx_size num_of_dims, const vx_size * roi_start, const vx_size * roi_end)
+VX_API_ENTRY vx_tensor VX_API_CALL vxCreateTensorFromView(vx_tensor tensor, vx_size num_of_dims, const vx_size * roi_start, const vx_size * roi_end)
 {
 	AgoData * master_tensor = (AgoData *)tensor;
 	AgoData * data = NULL;
@@ -7078,7 +7186,7 @@ VX_API_ENTRY vx_status VX_API_CALL vxQueryTensor(vx_tensor tensor, vx_enum attri
 		if (ptr) {
 			switch (attribute)
 			{
-			case VX_TENSOR_NUM_OF_DIMS:
+			case VX_TENSOR_NUMBER_OF_DIMS:
 				if (size == sizeof(vx_size)) {
 					*(vx_size *)ptr = data->u.tensor.num_dims;
 					status = VX_SUCCESS;
@@ -7098,12 +7206,13 @@ VX_API_ENTRY vx_status VX_API_CALL vxQueryTensor(vx_tensor tensor, vx_enum attri
 					status = VX_SUCCESS;
 				}
 				break;
-			case VX_TENSOR_FIXED_POINT_POS:
+			case VX_TENSOR_FIXED_POINT_POSITION:
 				if (size == sizeof(vx_uint8)) {
-					*(vx_uint8 *)ptr = data->u.tensor.fixed_point_pos;
+					*(vx_int8 *)ptr = data->u.tensor.fixed_point_pos;
 					status = VX_SUCCESS;
 				}
 				break;
+#if ENABLE_OPENCL
 			case VX_TENSOR_OFFSET_OPENCL:
 				if (size == sizeof(vx_size)) {
 					*(vx_size *)ptr = data->u.tensor.offset;
@@ -7118,6 +7227,22 @@ VX_API_ENTRY vx_status VX_API_CALL vxQueryTensor(vx_tensor tensor, vx_enum attri
 					status = VX_SUCCESS;
 				}
 				break;
+            case VX_TENSOR_BUFFER_OPENCL:
+                if (size == sizeof(cl_mem)) {
+                    if (data->opencl_buffer) {
+                        *(cl_mem *)ptr = data->opencl_buffer;
+                    }
+                    else {
+#if defined(CL_VERSION_2_0)
+                        *(vx_uint8 **)ptr = data->opencl_svm_buffer;
+#else
+                        *(vx_uint8 **)ptr = NULL;
+#endif
+                    }
+                    status = VX_SUCCESS;
+                }
+                break;
+#endif
 			default:
 				status = VX_ERROR_NOT_SUPPORTED;
 				break;
